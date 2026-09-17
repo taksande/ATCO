@@ -1,0 +1,341 @@
+name: Maximo Migration Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_definition:
+        description: "Maximo Migration Manager Package Definition"
+        required: true
+        type: string
+
+      target_name:
+        description: "Migration Manager target name"
+        required: true
+        type: string
+
+      readme:
+        description: "Migration package description"
+        required: false
+        default: "Created through GitHub Actions"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maximo-migration-${{ inputs.package_definition }}-${{ inputs.target_name }}
+  cancel-in-progress: false
+
+jobs:
+
+  create-distribute-download:
+    name: Create and Distribute Maximo Package
+    runs-on: ubuntu-latest
+
+    environment: maximo-source
+
+    steps:
+
+      # ---------------------------------------------------------
+      # 1. Display request information
+      # ---------------------------------------------------------
+      - name: Display migration request
+        run: |
+          echo "=========================================="
+          echo "Maximo Migration Manager Automation"
+          echo "=========================================="
+          echo "Package Definition : ${{ inputs.package_definition }}"
+          echo "Target             : ${{ inputs.target_name }}"
+          echo "=========================================="
+
+      # ---------------------------------------------------------
+      # 2. Create Migration Manager package
+      # ---------------------------------------------------------
+      - name: Create Migration Manager Package
+        id: create-package
+        uses: actions/github-script@v9
+        env:
+          MAXIMO_BASE_URL: ${{ vars.MAXIMO_BASE_URL }}
+          MAXIMO_API_KEY: ${{ secrets.MAXIMO_API_KEY }}
+          PACKAGE_DEFINITION: ${{ inputs.package_definition }}
+          PACKAGE_README: ${{ inputs.readme }}
+        with:
+          script: |
+
+            const baseUrl = process.env.MAXIMO_BASE_URL.replace(/\/$/, '');
+            const apiKey = process.env.MAXIMO_API_KEY;
+            const pkgDef = process.env.PACKAGE_DEFINITION;
+            const readme = process.env.PACKAGE_README;
+
+            const url = `${baseUrl}/maximo/api/dm/create`;
+
+            console.log(`Calling Maximo API: POST ${url}`);
+            console.log(`Package Definition: ${pkgDef}`);
+
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'apikey': apiKey,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pkgdefname: pkgDef,
+                readme: readme
+              })
+            });
+
+            const responseText = await response.text();
+
+            console.log(`HTTP Status: ${response.status}`);
+
+            if (!response.ok) {
+              console.error("Maximo Create API failed");
+              console.error(responseText);
+              core.setFailed(
+                `Package creation failed with HTTP ${response.status}`
+              );
+              return;
+            }
+
+            let result;
+
+            try {
+              result = JSON.parse(responseText);
+            } catch {
+              core.setFailed(
+                "Maximo Create API returned a non-JSON response"
+              );
+              return;
+            }
+
+            console.log("Package creation response:");
+            console.log(JSON.stringify(result, null, 2));
+
+            const packageId = result.dmpackageid;
+
+            if (!packageId) {
+              core.setFailed(
+                "dmpackageid was not returned by Maximo"
+              );
+              return;
+            }
+
+            console.log(`Created Migration Package ID: ${packageId}`);
+
+            core.setOutput(
+              'package_id',
+              String(packageId)
+            );
+
+            core.setOutput(
+              'package_filename',
+              result.filename || ''
+            );
+
+      # ---------------------------------------------------------
+      # 3. Distribute package
+      # ---------------------------------------------------------
+      - name: Distribute Migration Manager Package
+        id: distribute-package
+        uses: actions/github-script@v9
+        env:
+          MAXIMO_BASE_URL: ${{ vars.MAXIMO_BASE_URL }}
+          MAXIMO_API_KEY: ${{ secrets.MAXIMO_API_KEY }}
+          PACKAGE_DEFINITION: ${{ inputs.package_definition }}
+          TARGET_NAME: ${{ inputs.target_name }}
+          PACKAGE_ID: ${{ steps.create-package.outputs.package_id }}
+        with:
+          script: |
+
+            const baseUrl = process.env.MAXIMO_BASE_URL.replace(/\/$/, '');
+            const apiKey = process.env.MAXIMO_API_KEY;
+            const pkgDef = process.env.PACKAGE_DEFINITION;
+            const target = process.env.TARGET_NAME;
+            const packageId = Number(process.env.PACKAGE_ID);
+
+            const url = `${baseUrl}/maximo/api/dm/distribute`;
+
+            console.log(`Calling Maximo API: POST ${url}`);
+            console.log(`Package Definition: ${pkgDef}`);
+            console.log(`Package ID: ${packageId}`);
+            console.log(`Target: ${target}`);
+
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: {
+                'apikey': apiKey,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pkgdefname: pkgDef,
+                dmpackageid: packageId,
+                targetname: target
+              })
+            });
+
+            const responseText = await response.text();
+
+            console.log(`HTTP Status: ${response.status}`);
+
+            if (!response.ok) {
+              console.error("Maximo Distribution API failed");
+              console.error(responseText);
+
+              core.setFailed(
+                `Package distribution failed with HTTP ${response.status}`
+              );
+
+              return;
+            }
+
+            let result;
+
+            try {
+              result = JSON.parse(responseText);
+            } catch {
+              core.setFailed(
+                "Maximo Distribution API returned non-JSON response"
+              );
+              return;
+            }
+
+            console.log("Distribution response:");
+            console.log(JSON.stringify(result, null, 2));
+
+            if (result.distributionmessage) {
+              console.log(
+                `Distribution Message: ${result.distributionmessage}`
+              );
+            }
+
+            core.setOutput(
+              'distribution_status',
+              'SUCCESS'
+            );
+
+      # ---------------------------------------------------------
+      # 4. Download generated ZIP
+      # ---------------------------------------------------------
+      - name: Download Migration Package
+        id: download-package
+        uses: actions/github-script@v9
+        env:
+          MAXIMO_BASE_URL: ${{ vars.MAXIMO_BASE_URL }}
+          MAXIMO_API_KEY: ${{ secrets.MAXIMO_API_KEY }}
+          PACKAGE_DEFINITION: ${{ inputs.package_definition }}
+          PACKAGE_ID: ${{ steps.create-package.outputs.package_id }}
+        with:
+          script: |
+
+            const fs = require('fs');
+            const path = require('path');
+
+            const baseUrl = process.env.MAXIMO_BASE_URL.replace(/\/$/, '');
+            const apiKey = process.env.MAXIMO_API_KEY;
+            const pkgDef = process.env.PACKAGE_DEFINITION;
+            const packageId = process.env.PACKAGE_ID;
+
+            const url =
+              `${baseUrl}/maximo/api/dm/download` +
+              `?dmpackagedef=${encodeURIComponent(pkgDef)}` +
+              `&dmpackageid=${encodeURIComponent(packageId)}`;
+
+            console.log(`Calling Maximo API: GET ${url}`);
+
+            const response = await fetch(url, {
+              method: 'GET',
+              headers: {
+                'apikey': apiKey
+              }
+            });
+
+            console.log(`HTTP Status: ${response.status}`);
+
+            if (!response.ok) {
+
+              const errorText = await response.text();
+
+              console.error("Package download failed");
+              console.error(errorText);
+
+              core.setFailed(
+                `Package download failed with HTTP ${response.status}`
+              );
+
+              return;
+            }
+
+            const buffer =
+              Buffer.from(await response.arrayBuffer());
+
+            if (buffer.length === 0) {
+              core.setFailed(
+                "Downloaded package is empty"
+              );
+              return;
+            }
+
+            // Try to get filename from Content-Disposition
+            const contentDisposition =
+              response.headers.get('content-disposition');
+
+            let filename =
+              `maximo-${pkgDef}-${packageId}.zip`;
+
+            if (contentDisposition) {
+
+              const match =
+                contentDisposition.match(
+                  /filename="?([^"]+)"?/i
+                );
+
+              if (match && match[1]) {
+                filename = match[1];
+              }
+            }
+
+            filename = path.basename(filename);
+
+            const outputPath =
+              path.join(process.env.GITHUB_WORKSPACE, filename);
+
+            fs.writeFileSync(
+              outputPath,
+              buffer
+            );
+
+            console.log(`Package downloaded: ${filename}`);
+            console.log(`Package size: ${buffer.length} bytes`);
+            console.log(`Package path: ${outputPath}`);
+
+            core.setOutput(
+              'package_file',
+              outputPath
+            );
+
+      # ---------------------------------------------------------
+      # 5. Upload ZIP as GitHub artifact
+      # ---------------------------------------------------------
+      - name: Publish Migration Package Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: maximo-migration-${{ inputs.package_definition }}-${{ steps.create-package.outputs.package_id }}
+          path: ${{ steps.download-package.outputs.package_file }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # ---------------------------------------------------------
+      # 6. Final summary
+      # ---------------------------------------------------------
+      - name: Migration Summary
+        run: |
+          echo "=========================================="
+          echo "MAXIMO MIGRATION PACKAGE SUMMARY"
+          echo "=========================================="
+          echo "Package Definition : ${{ inputs.package_definition }}"
+          echo "Package ID         : ${{ steps.create-package.outputs.package_id }}"
+          echo "Target              : ${{ inputs.target_name }}"
+          echo "Distribution        : SUCCESS"
+          echo "Download            : SUCCESS"
+          echo "Artifact            : Uploaded"
+          echo "=========================================="
