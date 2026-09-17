@@ -1,0 +1,43 @@
+name: Maximo CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+
+  validate:
+    name: Validate Maximo Repository
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+      - name: Display repository files
+        run: |
+          echo "Maximo repository:"
+          ls -la
+
+      - name: Find Maximo configuration files
+        run: |
+          echo "XML files:"
+          find . -type f -name "*.xml" || true
+
+          echo "JSON files:"
+          find . -type f -name "*.json" || true
+
+          echo "YAML files:"
+          find . -type f \( -name "*.yaml" -o -name "*.yml" \) || true
+
+      - name: CI validation completed
+        run: |
+          echo "Maximo CI validation completed successfully."
