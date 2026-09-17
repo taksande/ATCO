@@ -1,0 +1,47 @@
+name: Maximo CD - DEV
+
+on:
+  workflow_run:
+    workflows:
+      - Maximo CI
+    types:
+      - completed
+
+jobs:
+
+  deploy-dev:
+
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: DEV
+
+    steps:
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maximo-package
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract package
+        run: |
+          mkdir package
+          tar -xzf maximo-package.tar.gz -C package
+
+      - name: Upload package
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_API_KEY: ${{ secrets.MAXIMO_API_KEY }}
+        run: |
+          echo "Uploading Maximo package..."
+
+          curl --fail \
+            --request POST \
+            --header "apikey: ${MAXIMO_API_KEY}" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "@maximo-package.tar.gz" \
+            "${MAXIMO_URL}/maximo/api/dm"
