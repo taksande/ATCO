@@ -1,0 +1,234 @@
+name: Maximo Migration Manager CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_definition:
+        description: "Maximo Migration Manager package definition"
+        required: true
+        type: string
+
+      target_name:
+        description: "Maximo target"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maximo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+
+  create-package:
+    name: Create Maximo Package
+    runs-on: ubuntu-latest
+
+    environment:
+      name: maximo-dev
+
+    outputs:
+      package_id: ${{ steps.create.outputs.package_id }}
+      package_file: ${{ steps.download.outputs.package_file }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Create package
+        id: create
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+          MAXIMO_PKGDEF: ${{ inputs.package_definition }}
+        run: |
+
+          $body = @{
+            pkgdefname = $env:MAXIMO_PKGDEF
+            readme = "GitHub Actions - $env:GITHUB_SHA"
+          } | ConvertTo-Json
+
+          $response = Invoke-RestMethod `
+            -Uri "$env:MAXIMO_URL/dm/create" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -ContentType "application/json" `
+            -Body $body
+
+          $id = $response.dmpackageid
+
+          if (-not $id) {
+            throw "Maximo did not return dmpackageid"
+          }
+
+          Write-Host "Package created: $id"
+
+          "package_id=$id" >> $env:GITHUB_OUTPUT
+
+      - name: Distribute package
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+          MAXIMO_PKGDEF: ${{ inputs.package_definition }}
+          DM_PACKAGE_ID: ${{ steps.create.outputs.package_id }}
+          MAXIMO_TARGET: ${{ inputs.target_name }}
+        run: |
+
+          $body = @{
+            pkgdefname = $env:MAXIMO_PKGDEF
+            dmpackageid = [int]$env:DM_PACKAGE_ID
+            targetname = $env:MAXIMO_TARGET
+          } | ConvertTo-Json
+
+          Invoke-RestMethod `
+            -Uri "$env:MAXIMO_URL/dm/distribute" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -ContentType "application/json" `
+            -Body $body
+
+      - name: Download package
+        id: download
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+          MAXIMO_PKGDEF: ${{ inputs.package_definition }}
+          DM_PACKAGE_ID: ${{ steps.create.outputs.package_id }}
+        run: |
+
+          $file = "maximo-$env:DM_PACKAGE_ID.zip"
+
+          Invoke-WebRequest `
+            -Uri "$env:MAXIMO_URL/dm/download?dmpackagedef=$env:MAXIMO_PKGDEF&dmpackageid=$env:DM_PACKAGE_ID" `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -OutFile $file
+
+          if (!(Test-Path $file)) {
+            throw "Package download failed"
+          }
+
+          Get-FileHash $file -Algorithm SHA256
+
+          "package_file=$file" >> $env:GITHUB_OUTPUT
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maximo-package-${{ steps.create.outputs.package_id }}
+          path: ${{ steps.download.outputs.package_file }}
+          retention-days: 7
+
+
+  deploy-test:
+    name: Deploy to TEST
+    needs: create-package
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: maximo-test
+
+    steps:
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: maximo-package-${{ needs.create-package.outputs.package_id }}
+
+      - name: Upload package to TEST
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+        run: |
+
+          $package = Get-ChildItem *.zip | Select-Object -First 1
+
+          Invoke-WebRequest `
+            -Uri "$env:MAXIMO_URL/dm/upload?filename=$($package.Name)" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -ContentType "application/zip" `
+            -InFile $package.FullName
+
+      - name: Deploy TEST
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+        run: |
+
+          $response = Invoke-RestMethod `
+            -Uri "$env:MAXIMO_URL/dm/deploy" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -ContentType "application/json"
+
+          $response | ConvertTo-Json -Depth 20
+
+
+  deploy-prod:
+    name: Deploy to PROD
+    needs: deploy-test
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: maximo-prod
+
+    steps:
+
+      - name: Download package
+        uses: actions/download-artifact@v5
+        with:
+          name: maximo-package-${{ needs.create-package.outputs.package_id }}
+
+      - name: Upload package
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+        run: |
+
+          $package = Get-ChildItem *.zip | Select-Object -First 1
+
+          Invoke-WebRequest `
+            -Uri "$env:MAXIMO_URL/dm/upload?filename=$($package.Name)" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            } `
+            -ContentType "application/zip" `
+            -InFile $package.FullName
+
+      - name: Deploy PROD
+        shell: pwsh
+        env:
+          MAXIMO_URL: ${{ secrets.MAXIMO_URL }}
+          MAXIMO_APIKEY: ${{ secrets.MAXIMO_APIKEY }}
+        run: |
+
+          $response = Invoke-RestMethod `
+            -Uri "$env:MAXIMO_URL/dm/deploy" `
+            -Method POST `
+            -Headers @{
+              apikey = $env:MAXIMO_APIKEY
+            }
+
+          $response | ConvertTo-Json -Depth 20
