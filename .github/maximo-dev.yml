@@ -1,0 +1,27 @@
+name: Maximo Deploy DEV
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  deploy-dev:
+    name: Deploy Maximo to DEV
+    runs-on: ubuntu-latest
+
+    environment:
+      name: DEV
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Show deployment information
+        run: |
+          echo "Deploying Maximo package to DEV"
+          echo "Target: DEV"
+
+      - name: Deploy Maximo
+        run: |
+          echo "Maximo deployment will be executed here"
