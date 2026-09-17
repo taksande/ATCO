@@ -1,0 +1,53 @@
+name: Maximo CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+  push:
+    branches:
+      - develop
+
+jobs:
+
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate repository
+        shell: bash
+        run: |
+          echo "Validating Maximo configuration..."
+
+          find . -type f \
+            \( -name "*.xml" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" \)
+
+      - name: Check XML
+        shell: bash
+        run: |
+          for file in $(find . -name "*.xml"); do
+            xmllint --noout "$file"
+          done
+
+      - name: Package
+        run: |
+          mkdir -p artifact
+
+          tar -czf artifact/maximo-package.tar.gz \
+            automation-scripts \
+            maxapps \
+            domains \
+            workflows \
+            migration
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maximo-package
+          path: artifact/maximo-package.tar.gz
